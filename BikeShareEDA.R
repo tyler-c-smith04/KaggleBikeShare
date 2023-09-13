@@ -3,6 +3,7 @@
 library(tidyverse)
 library(vroom)
 library(patchwork)
+library(tidymodels)
 
 bike <- vroom("./train.csv")
 
