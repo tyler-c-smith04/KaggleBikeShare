@@ -14,7 +14,7 @@ bike <- vroom("./train.csv")
 bike %>% 
   filter(weather !=4)
 
-bike %>% 
+bike <- bike %>% 
   mutate(weather = ifelse(weather == 4,3,weather))
 
 
