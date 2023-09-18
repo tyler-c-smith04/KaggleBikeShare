@@ -4,6 +4,7 @@ library(tidyverse)
 library(vroom)
 library(patchwork)
 library(tidymodels)
+library(poissonreg)
 
 bike <- vroom("./train.csv")
 bike <- bike %>% 
@@ -51,3 +52,32 @@ predictions$datetime <- as.character(predictions$datetime)
 
 # Write that dataset to a csv file
 vroom_write(predictions, 'predictions.csv', ",")
+
+# Look at the fitted LM model
+extract_fit_engine(bike_workflow) %>% 
+  tidy()
+
+extract_fit_engine(bike_workflow) %>% 
+  summary
+
+# Poisson Regression ------------------------------------------------------
+pois_mod <- poisson_reg() %>% # Type of model
+  set_engine('glm') #Engine = What R Function to use
+
+bike_pois_workflow <- workflow() %>% 
+  add_recipe(my_recipe) %>% 
+  add_model(pois_mod) %>% 
+  fit(data = bike) # Fit the workflow
+
+bike_pois_predictions <- predict(bike_pois_workflow,
+                            new_data = test)
+
+# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
+pois_predictions <- data.frame(test$datetime, bike_pois_predictions)
+colnames(pois_predictions) <- c('datetime', 'count')
+
+# Change formatting of datetime
+pois_predictions$datetime <- as.character(pois_predictions$datetime)
+
+# Write that dataset to a csv file
+vroom_write(pois_predictions, 'pois_predictions.csv', ",")
