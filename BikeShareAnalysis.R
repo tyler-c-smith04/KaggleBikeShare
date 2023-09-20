@@ -81,3 +81,45 @@ pois_predictions$datetime <- as.character(pois_predictions$datetime)
 
 # Write that dataset to a csv file
 vroom_write(pois_predictions, 'pois_predictions.csv', ",")
+
+# Penalized Regression ----------------------------------------------------
+
+log_bike <- bike %>% 
+  mutate(count=log(count))
+
+log_recipe <- recipe(count ~ ., data = log_bike) %>% 
+  step_time(datetime, features=c("hour")) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
+  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
+  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+  
+prepped_pen_recipe <- prep(log_recipe)
+bake(prepped_pen_recipe, new_data = log_bike)
+
+## Penalized regression model10
+preg_model <- linear_reg(penalty=0, mixture=0) %>% #Set model and tuning11
+  set_engine("glmnet") # Function to fit in R12
+
+preg_wf <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(preg_model) %>% 
+  fit(data = log_bike)
+
+pen_predictions <- predict(preg_wf, new_data = test)
+
+# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
+pen_predictions <- data.frame(test$datetime, pen_predictions)
+colnames(pen_predictions) <- c('datetime', 'count')
+
+# Change formatting of datetime
+pen_predictions$datetime <- as.character(pen_predictions$datetime)
+
+# Write that dataset to a csv file
+vroom_write(pen_predictions, 'pen_predictions.csv', ",") 
+
+
