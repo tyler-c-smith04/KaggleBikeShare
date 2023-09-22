@@ -82,6 +82,17 @@ pois_predictions$datetime <- as.character(pois_predictions$datetime)
 # Write that dataset to a csv file
 vroom_write(pois_predictions, 'pois_predictions.csv', ",")
 
+pois_mod <- poisson_reg() %>% # Type of model
+  set_engine('glm') #Engine = What R Function to use
+
+bike_pois_workflow <- workflow() %>% 
+  add_recipe(my_recipe) %>% 
+  add_model(pois_mod) %>% 
+  fit(data = bike) # Fit the workflow
+
+bike_pois_predictions <- predict(bike_pois_workflow,
+                                 new_data = test)
+
 # Penalized Regression ----------------------------------------------------
 
 log_bike <- bike %>% 
@@ -122,4 +133,52 @@ pen_predictions$datetime <- as.character(pen_predictions$datetime)
 # Write that dataset to a csv file
 vroom_write(pen_predictions, 'pen_predictions.csv', ",") 
 
+
+# Test with Poisson and log_bike (BAD) ------------------------------------------
+pois_mod <- poisson_reg() %>% # Type of model
+  set_engine('glm') #Engine = What R Function to use
+
+log_pois_workflow <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(pois_mod) %>% 
+  fit(data = log_bike) # Fit the workflow
+
+log_pois_predictions <- predict(log_pois_workflow,
+                                 new_data = test)
+
+# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
+log_pois_predictions <- data.frame(test$datetime, log_pois_predictions)
+colnames(log_pois_predictions) <- c('datetime', 'count')
+
+# Change formatting of datetime
+log_pois_predictions$datetime <- as.character(log_pois_predictions$datetime)
+
+# Write that dataset to a csv file
+vroom_write(log_pois_predictions, 'log_pois_predictions.csv', ",") 
+
+
+# Test log linear model (BAD)---------------------------------------------------
+my_mod <- linear_reg() %>% # Type of model
+  set_engine('lm') #Engine = What R Function to use
+
+log_bike_workflow <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(my_mod) %>% 
+  fit(data = log_bike) # Fit the workflow
+
+log_lin_predictions <- predict(log_bike_workflow,
+                            new_data = test)
+
+# Round negative numbers to 1 because we can't have negatives
+log_lin_predictions[log_lin_predictions < 0] <- 0
+
+# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
+log_lin_predictions <- data.frame(test$datetime, log_lin_predictions)
+colnames(log_lin_predictions) <- c('datetime', 'count')
+
+# Change formatting of datetime
+log_lin_predictions$datetime <- as.character(log_lin_predictions$datetime)
+
+# Write that dataset to a csv file
+vroom_write(log_lin_predictions, 'log_lin_predictions.csv', ",")
 
