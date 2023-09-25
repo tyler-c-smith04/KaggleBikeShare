@@ -96,7 +96,8 @@ bike_pois_predictions <- predict(bike_pois_workflow,
 # Penalized Regression ----------------------------------------------------
 
 log_bike <- bike %>% 
-  mutate(count=log(count))
+  mutate(count=log(count)) %>% 
+  select(-casual,-registered)
 
 log_recipe <- recipe(count ~ ., data = log_bike) %>% 
   step_time(datetime, features=c("hour")) %>%
@@ -107,7 +108,8 @@ log_recipe <- recipe(count ~ ., data = log_bike) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
   step_rm(datetime) %>%
   step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors())
+  step_normalize(all_numeric_predictors()) %>% 
+  step_nzv(all_numeric_predictors())
   
 prepped_pen_recipe <- prep(log_recipe)
 bake(prepped_pen_recipe, new_data = log_bike)
@@ -132,6 +134,60 @@ pen_predictions$datetime <- as.character(pen_predictions$datetime)
 
 # Write that dataset to a csv file
 vroom_write(pen_predictions, 'pen_predictions.csv', ",") 
+
+
+# Tuning Models -----------------------------------------------------------
+lin_pen_model <- linear_reg(penalty=tune(),
+                              mixture=tune()) %>% 
+  set_engine('glmnet')
+
+## Set Workflow
+lin_pen_wf <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(lin_pen_model)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(penalty(),
+                            mixture(),
+                            levels = 5)
+
+## Split data for CV
+folds <- vfold_cv(log_bike, v = 5, repeats=5)
+
+## Run the CV
+CV_results <- lin_pen_wf %>% 
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq))
+
+## Plot Results
+collect_metrics(CV_results) %>% #Gathers metrics into DF
+  filter(.metric=='rmse') %>% 
+  ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
+  geom_line()
+
+## Find Best Tuning Parameters
+best_Tune <- CV_results %>% 
+  select_best('rmse')
+
+## Finalize the Workflow & fit it
+final_wf <- lin_pen_wf %>% 
+  finalize_workflow(best_Tune) %>% 
+  fit(data = log_bike)
+
+## Predict
+lin_pen_predictions <- final_wf %>% 
+  predict(new_data = test)
+
+# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
+lin_pen_preds <- data.frame(test$datetime, lin_pen_predictions)
+colnames(lin_pen_preds) <- c('datetime', 'count')
+
+# Change formatting of datetime
+lin_pen_preds$datetime <- as.character(lin_pen_preds$datetime)
+
+# Write that dataset to a csv file
+vroom_write(lin_pen_preds, 'lin_pen_preds.csv', ",") 
 
 
 # Test with Poisson and log_bike (BAD) ------------------------------------------
