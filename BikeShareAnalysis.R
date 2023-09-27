@@ -238,3 +238,71 @@ log_lin_predictions$datetime <- as.character(log_lin_predictions$datetime)
 # Write that dataset to a csv file
 vroom_write(log_lin_predictions, 'log_lin_predictions.csv', ",")
 
+# Regression Tree ---------------------------------------------------------
+install.packages('rpart')
+library(tidymodels)
+
+log_recipe <- recipe(count ~ ., data = log_bike) %>% 
+  step_time(datetime, features=c("hour")) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
+  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
+  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_nzv(all_numeric_predictors())
+
+prepped_log_recipe <- prep(log_recipe)
+bake(prepped_log_recipe, new_data = log_bike)
+
+tree_mod <- decision_tree(tree_depth = tune(),
+                          cost_complexity = tune(),
+                          min_n = tune()) %>% # Type of model
+  set_engine('rpart') %>%
+  set_mode('regression')
+
+## Set Workflow
+tree_wf <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(tree_mod)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(tree_depth(),
+                            cost_complexity(),
+                            min_n(),
+                            levels = 5)
+
+## Split data for CV
+folds <- vfold_cv(log_bike, v = 5, repeats=5)
+
+## Run the CV
+CV_results <- tree_wf %>% 
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq))
+
+## Find Best Tuning Parameters
+best_Tune <- CV_results %>% 
+  select_best('rmse')
+
+## Finalize the Workflow & fit it
+final_tree_wf <- tree_wf %>% 
+  finalize_workflow(best_Tune) %>% 
+  fit(data = log_bike)
+
+## Predict
+## Get Predictions for test set AND format for Kaggle
+tree_preds <- predict(final_tree_wf, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+## Write predictions to CSV
+vroom_write(x=tree_preds, file="./tree_preds.csv", delim=",")
+
+
