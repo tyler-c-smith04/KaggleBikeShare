@@ -96,8 +96,7 @@ bike_pois_predictions <- predict(bike_pois_workflow,
 # Penalized Regression ----------------------------------------------------
 
 log_bike <- bike %>% 
-  mutate(count=log(count)) %>% 
-  select(-casual,-registered)
+  mutate(count=log(count))
 
 log_recipe <- recipe(count ~ ., data = log_bike) %>% 
   step_time(datetime, features=c("hour")) %>%
@@ -306,3 +305,71 @@ tree_preds <- predict(final_tree_wf, new_data = test) %>% #This predicts log(cou
 vroom_write(x=tree_preds, file="./tree_preds.csv", delim=",")
 
 
+# Random Forests ----------------------------------------------------------
+install.packages('rpart')
+library(tidymodels)
+library(rpart)
+library(ranger)
+
+log_bike <- bike %>% 
+  mutate(count = log(count))
+
+log_recipe <- recipe(count ~ ., data = log_bike) %>% 
+  step_time(datetime, features=c("hour")) %>%
+  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
+  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
+  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
+  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_nzv(all_numeric_predictors())
+
+prepped_log_recipe <- prep(log_recipe)
+
+forest_mod <- rand_forest(mtry = tune(),
+                          min_n = tune(),
+                          trees = 1000) %>%
+  set_engine('ranger') %>%  # What R function to use
+  set_mode("regression")
+
+## Set Workflow
+rand_wf <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(forest_mod)
+
+# Set up grid of tuning values
+tuning_grid <- grid_regular(mtry(range = c(1, (ncol(log_bike)-1))),
+                            min_n(),
+                            levels = 5)
+
+# Set up K-fold CV
+folds <- vfold_cv(log_bike, v = 5, repeats=5)
+
+## Run the CV
+rf_cv_results <- rand_wf %>% 
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq))
+
+## Find Best Tuning Parameters
+best_Tune <- rf_cv_results %>% 
+  select_best('rmse')
+
+## Finalize the Workflow & fit it
+final_rand_wf <- rand_wf %>% 
+  finalize_workflow(best_Tune) %>% 
+  fit(data = log_bike)
+
+## Get Predictions for test set AND format for Kaggle
+rand_preds <- predict(final_rand_wf, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+## Write predictions to CSV
+vroom_write(x=rand_preds, file="./rand_preds.csv", delim=",")
