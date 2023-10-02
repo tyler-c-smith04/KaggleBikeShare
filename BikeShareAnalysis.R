@@ -10,21 +10,27 @@ bike <- vroom("./train.csv")
 bike <- bike %>% 
   select(-casual, -registered)
 
-# Clean -------------------------------------------------------------------
+log_bike <- bike %>% 
+  mutate(count = log(count))
 
-my_recipe <- recipe(count ~ ., data = bike) %>% 
+log_recipe <- recipe(count ~ ., data = log_bike) %>% 
   step_time(datetime, features=c("hour")) %>%
   step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
   step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
   step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes")))
+  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
+  step_rm(datetime) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  step_nzv(all_numeric_predictors())
 
-prepped_recipe <- prep(my_recipe)
-bike_clean <- bake(prepped_recipe, new_data = bike)
+prepped_pen_recipe <- prep(log_recipe)
+bake(prepped_pen_recipe, new_data = log_bike)
+
+# Clean -------------------------------------------------------------------
 
 test <- vroom("./test.csv")
-
 
 # Linear Regression -------------------------------------------------------
 
@@ -32,9 +38,9 @@ my_mod <- linear_reg() %>% # Type of model
   set_engine('lm') #Engine = What R Function to use
 
 bike_workflow <- workflow() %>% 
-  add_recipe(my_recipe) %>% 
+  add_recipe(log_recipe) %>% 
   add_model(my_mod) %>% 
-  fit(data = bike) # Fit the workflow
+  fit(data = log_bike) # Fit the workflow
 
 bike_predictions <- predict(bike_workflow,
                             new_data = test)
@@ -43,15 +49,16 @@ bike_predictions <- predict(bike_workflow,
 bike_predictions[bike_predictions < 0] <- 0
 view(bike_predictions)
 
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-predictions <- data.frame(test$datetime, bike_predictions)
-colnames(predictions) <- c('datetime', 'count')
-
-# Change formatting of datetime
-predictions$datetime <- as.character(predictions$datetime)
+lin_reg_preds <- predict(bike_workflow, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 # Write that dataset to a csv file
-vroom_write(predictions, 'predictions.csv', ",")
+vroom_write(x=lin_reg_preds, file="./lin_reg_preds.csv", delim=",")
 
 # Look at the fitted LM model
 extract_fit_engine(bike_workflow) %>% 
@@ -64,55 +71,27 @@ extract_fit_engine(bike_workflow) %>%
 pois_mod <- poisson_reg() %>% # Type of model
   set_engine('glm') #Engine = What R Function to use
 
-bike_pois_workflow <- workflow() %>% 
-  add_recipe(my_recipe) %>% 
+pois_wf <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
   add_model(pois_mod) %>% 
-  fit(data = bike) # Fit the workflow
+  fit(data = log_bike) # Fit the workflow
 
-bike_pois_predictions <- predict(bike_pois_workflow,
+pois_preds <- predict(pois_wf,
                             new_data = test)
 
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-pois_predictions <- data.frame(test$datetime, bike_pois_predictions)
-colnames(pois_predictions) <- c('datetime', 'count')
-
-# Change formatting of datetime
-pois_predictions$datetime <- as.character(pois_predictions$datetime)
+pois_preds <- predict(pois_wf, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 # Write that dataset to a csv file
-vroom_write(pois_predictions, 'pois_predictions.csv', ",")
+vroom_write(x=pois_preds, file="./pois_preds.csv", delim=",")
 
-pois_mod <- poisson_reg() %>% # Type of model
-  set_engine('glm') #Engine = What R Function to use
-
-bike_pois_workflow <- workflow() %>% 
-  add_recipe(my_recipe) %>% 
-  add_model(pois_mod) %>% 
-  fit(data = bike) # Fit the workflow
-
-bike_pois_predictions <- predict(bike_pois_workflow,
-                                 new_data = test)
-
-# Penalized Regression ----------------------------------------------------
-
-log_bike <- bike %>% 
-  mutate(count=log(count))
-
-log_recipe <- recipe(count ~ ., data = log_bike) %>% 
-  step_time(datetime, features=c("hour")) %>%
-  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
-  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
-  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
-  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_rm(datetime) %>%
-  step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) %>% 
-  step_nzv(all_numeric_predictors())
+# Penalized Regression ---------------------------------------------------
   
-prepped_pen_recipe <- prep(log_recipe)
-bake(prepped_pen_recipe, new_data = log_bike)
-
 ## Penalized regression model10
 preg_model <- linear_reg(penalty=0, mixture=0) %>% #Set model and tuning11
   set_engine("glmnet") # Function to fit in R12
@@ -122,139 +101,72 @@ preg_wf <- workflow() %>%
   add_model(preg_model) %>% 
   fit(data = log_bike)
 
-pen_predictions <- predict(preg_wf, new_data = test)
+pen_preds <- predict(preg_wf, new_data = test)
 
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-pen_predictions <- data.frame(test$datetime, pen_predictions)
-colnames(pen_predictions) <- c('datetime', 'count')
-
-# Change formatting of datetime
-pen_predictions$datetime <- as.character(pen_predictions$datetime)
+pen_preds <- predict(preg_wf, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
 # Write that dataset to a csv file
-vroom_write(pen_predictions, 'pen_predictions.csv', ",") 
-
+vroom_write(x=pen_preds, file="./pen_preds.csv", delim=",")
 
 # Tuning Models -----------------------------------------------------------
-lin_pen_model <- linear_reg(penalty=tune(),
-                              mixture=tune()) %>% 
-  set_engine('glmnet')
+penalized_model <- linear_reg(penalty=tune(),
+                              mixture=tune()) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
 
-## Set Workflow
-lin_pen_wf <- workflow() %>% 
-  add_recipe(log_recipe) %>% 
-  add_model(lin_pen_model)
+# Set Workflow
+tuning_wf <- workflow() %>%
+  add_recipe(log_recipe) %>%
+  add_model(penalized_model)
 
-## Grid of values to tune over
+# Grid of values to tune over
 tuning_grid <- grid_regular(penalty(),
                             mixture(),
-                            levels = 5)
+                            levels = 5) ## L^2 total tuning possibilities
 
-## Split data for CV
-folds <- vfold_cv(log_bike, v = 5, repeats=5)
+# split data for cross validation
+folds <- vfold_cv(log_bike, v = 5, repeats = 5)
 
 ## Run the CV
-CV_results <- lin_pen_wf %>% 
+CV_results <- tuning_wf %>%
   tune_grid(resamples=folds,
             grid=tuning_grid,
-            metrics=metric_set(rmse, mae, rsq))
+            metrics=metric_set(rmse, mae)) #Or leave metrics NULL
 
-## Plot Results
-collect_metrics(CV_results) %>% #Gathers metrics into DF
-  filter(.metric=='rmse') %>% 
+# plot results
+collect_metrics(CV_results) %>% # Gathers metrics into DF
+  filter(.metric=="rmse") %>%
   ggplot(data=., aes(x=penalty, y=mean, color=factor(mixture))) +
   geom_line()
 
-## Find Best Tuning Parameters
-best_Tune <- CV_results %>% 
-  select_best('rmse')
+# Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best("rmse")
 
-## Finalize the Workflow & fit it
-final_wf <- lin_pen_wf %>% 
-  finalize_workflow(best_Tune) %>% 
-  fit(data = log_bike)
+# Finalize the Workflow & fit it
+tuning_wf <- tuning_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=log_bike)
 
-## Predict
-lin_pen_predictions <- final_wf %>% 
-  predict(new_data = test)
+penalized_model_preds <- predict(tuning_wf, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
 
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-lin_pen_preds <- data.frame(test$datetime, lin_pen_predictions)
-colnames(lin_pen_preds) <- c('datetime', 'count')
-
-# Change formatting of datetime
-lin_pen_preds$datetime <- as.character(lin_pen_preds$datetime)
-
-# Write that dataset to a csv file
-vroom_write(lin_pen_preds, 'lin_pen_preds.csv', ",") 
-
-
-# Test with Poisson and log_bike (BAD) ------------------------------------------
-pois_mod <- poisson_reg() %>% # Type of model
-  set_engine('glm') #Engine = What R Function to use
-
-log_pois_workflow <- workflow() %>% 
-  add_recipe(log_recipe) %>% 
-  add_model(pois_mod) %>% 
-  fit(data = log_bike) # Fit the workflow
-
-log_pois_predictions <- predict(log_pois_workflow,
-                                 new_data = test)
-
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-log_pois_predictions <- data.frame(test$datetime, log_pois_predictions)
-colnames(log_pois_predictions) <- c('datetime', 'count')
-
-# Change formatting of datetime
-log_pois_predictions$datetime <- as.character(log_pois_predictions$datetime)
-
-# Write that dataset to a csv file
-vroom_write(log_pois_predictions, 'log_pois_predictions.csv', ",") 
-
-
-# Test log linear model (BAD)---------------------------------------------------
-my_mod <- linear_reg() %>% # Type of model
-  set_engine('lm') #Engine = What R Function to use
-
-log_bike_workflow <- workflow() %>% 
-  add_recipe(log_recipe) %>% 
-  add_model(my_mod) %>% 
-  fit(data = log_bike) # Fit the workflow
-
-log_lin_predictions <- predict(log_bike_workflow,
-                            new_data = test)
-
-# Round negative numbers to 1 because we can't have negatives
-log_lin_predictions[log_lin_predictions < 0] <- 0
-
-# Create a dataframe that only has datetime and predictions (To upload to Kaggle)
-log_lin_predictions <- data.frame(test$datetime, log_lin_predictions)
-colnames(log_lin_predictions) <- c('datetime', 'count')
-
-# Change formatting of datetime
-log_lin_predictions$datetime <- as.character(log_lin_predictions$datetime)
-
-# Write that dataset to a csv file
-vroom_write(log_lin_predictions, 'log_lin_predictions.csv', ",")
+vroom_write(x=penalized_model_preds, file="./penalized_model_preds.csv", delim=",")
 
 # Regression Tree ---------------------------------------------------------
 install.packages('rpart')
 library(tidymodels)
-
-log_recipe <- recipe(count ~ ., data = log_bike) %>% 
-  step_time(datetime, features=c("hour")) %>%
-  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
-  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
-  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
-  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_rm(datetime) %>%
-  step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) %>% 
-  step_nzv(all_numeric_predictors())
-
-prepped_log_recipe <- prep(log_recipe)
-bake(prepped_log_recipe, new_data = log_bike)
+library(rpart)
 
 tree_mod <- decision_tree(tree_depth = tune(),
                           cost_complexity = tune(),
@@ -268,7 +180,7 @@ tree_wf <- workflow() %>%
   add_model(tree_mod)
 
 ## Grid of values to tune over
-tuning_grid <- grid_regular(tree_depth(),
+reg_tree_tuning_grid <- grid_regular(tree_depth(),
                             cost_complexity(),
                             min_n(),
                             levels = 5)
@@ -279,7 +191,7 @@ folds <- vfold_cv(log_bike, v = 5, repeats=5)
 ## Run the CV
 CV_results <- tree_wf %>% 
   tune_grid(resamples=folds,
-            grid=tuning_grid,
+            grid=reg_tree_tuning_grid,
             metrics=metric_set(rmse, mae, rsq))
 
 ## Find Best Tuning Parameters
@@ -304,33 +216,15 @@ tree_preds <- predict(final_tree_wf, new_data = test) %>% #This predicts log(cou
 ## Write predictions to CSV
 vroom_write(x=tree_preds, file="./tree_preds.csv", delim=",")
 
-
 # Random Forests ----------------------------------------------------------
 install.packages('rpart')
 library(tidymodels)
 library(rpart)
 library(ranger)
 
-log_bike <- bike %>% 
-  mutate(count = log(count))
-
-log_recipe <- recipe(count ~ ., data = log_bike) %>% 
-  step_time(datetime, features=c("hour")) %>%
-  step_mutate(weather=ifelse(weather==4, 3, weather)) %>% 
-  step_num2factor(season, levels=c("spring", "summer", "fall", "winter")) %>%
-  step_num2factor(weather, levels=c("partly_cloudy", "misty", "rainy")) %>%
-  step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("no", "yes"))) %>%
-  step_rm(datetime) %>%
-  step_dummy(all_nominal_predictors()) %>% 
-  step_normalize(all_numeric_predictors()) %>% 
-  step_nzv(all_numeric_predictors())
-
-prepped_log_recipe <- prep(log_recipe)
-
 forest_mod <- rand_forest(mtry = tune(),
                           min_n = tune(),
-                          trees = 1000) %>%
+                          trees = 500) %>%
   set_engine('ranger') %>%  # What R function to use
   set_mode("regression")
 
@@ -373,3 +267,121 @@ rand_preds <- predict(final_rand_wf, new_data = test) %>% #This predicts log(cou
 
 ## Write predictions to CSV
 vroom_write(x=rand_preds, file="./rand_preds.csv", delim=",")
+
+lin_mod <- linear_reg() %>% # Type of model
+  set_engine('lm') #Engine = What R Function to use
+
+bike_workflow <- workflow() %>% 
+  add_recipe(log_recipe) %>% 
+  add_model(lin_mod) %>% 
+  fit(data = log_bike) # Fit the workflow
+
+bike_predictions <- predict(bike_workflow,
+                            new_data = test)
+
+# Model Stacking ----------------------------------------------------------
+## Split data for CV
+stacking_folds <- vfold_cv(log_bike, v = 10, repeats=1)
+
+## Create a control grid
+untunedModel <- control_stack_grid() #If tuning over a grid
+tunedModel <- control_stack_resamples() #If not tuning a model
+
+## Penalized regression model
+preg_model <- linear_reg(penalty=tune(),
+                         mixture=tune()) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+## Set Workflow
+preg_wf <- workflow() %>%
+  add_recipe(log_recipe) %>%
+  add_model(preg_model)
+
+## Grid of values to tune over
+preg_tuning_grid <- grid_regular(penalty(),
+                                 mixture(),
+                                 levels = 5) ## L^2 total tuning possibilities
+
+## Run the CV
+preg_models <- preg_wf %>%
+  tune_grid(resamples=stacking_folds,
+            grid=preg_tuning_grid,
+            metrics=metric_set(rmse),
+            control = untunedModel) # including the control grid in the tuning ensures you can
+# call on it later in the stacked model
+
+## Create other resampling objects with different ML algorithms to include in a stacked model, for example
+lin_reg <-
+  linear_reg() %>%
+  set_engine("lm")
+lin_reg_wf <-
+  workflow() %>%
+  add_model(lin_reg) %>%
+  add_recipe(log_recipe)
+lin_reg_model <-
+  fit_resamples(
+    lin_reg_wf,
+    resamples = stacking_folds,
+    metrics = metric_set(rmse),
+    control = tunedModel
+  )
+
+# add regression tree
+reg_tree <- decision_tree(tree_depth = tune(),
+                          cost_complexity = tune(),
+                          min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # Engine = What R function to use
+  set_mode("regression")
+
+reg_tree_wf <-
+  workflow() %>%
+  add_model(tree_mod) %>%
+  add_recipe(log_recipe)
+
+reg_tree_model <-
+  tune_grid(
+    tree_wf,
+    grid = reg_tree_tuning_grid,
+    resamples = stacking_folds,
+    metrics = metric_set(rmse),
+    control = untunedModel)
+
+## Specify with models to include
+my_stack <- stacks() %>%
+  add_candidates(preg_models) %>%
+  add_candidates(lin_reg_model) %>% 
+  add_candidates(reg_tree_model)
+
+## Fit the stacked model
+stack_mod <- my_stack %>%
+  blend_predictions() %>% # LASSO penalized regression meta-learner
+  fit_members() ## Fit the members to the dataset
+
+## If you want to build your own metalearner you'll have to do so manually
+## using
+stackData <- as_tibble(my_stack)
+
+## Use the stacked data to get a prediction
+stack_mod %>% predict(new_data=test)
+
+# random_forest_model <-
+#   tune_grid(
+#     rf_wf,
+#     grid = tuning_grid,
+#     resamples = folds,
+#     metrics = metric_set(rmse),
+#     control = untunedModel) # including this in my stack made the score go up
+
+# Get Predictions for test set AND format for Kaggle
+stack_preds <- stack_mod %>% predict(new_data=test) %>%
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+# Write prediction file to CSV
+vroom_write(x=stack_preds, file="./stacking_predictions.csv", delim=",")
+
+
+
