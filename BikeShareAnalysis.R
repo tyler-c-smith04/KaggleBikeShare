@@ -268,6 +268,11 @@ rand_preds <- predict(final_rand_wf, new_data = test) %>% #This predicts log(cou
 ## Write predictions to CSV
 vroom_write(x=rand_preds, file="./rand_preds.csv", delim=",")
 
+
+# Linear Model ------------------------------------------------------------
+
+
+### Linear Model
 lin_mod <- linear_reg() %>% # Type of model
   set_engine('lm') #Engine = What R Function to use
 
@@ -280,6 +285,7 @@ bike_predictions <- predict(bike_workflow,
                             new_data = test)
 
 # Model Stacking ----------------------------------------------------------
+library(stacks)
 ## Split data for CV
 stacking_folds <- vfold_cv(log_bike, v = 10, repeats=1)
 
@@ -326,7 +332,7 @@ lin_reg_model <-
     control = tunedModel
   )
 
-# add regression tree
+# # add regression tree
 reg_tree <- decision_tree(tree_depth = tune(),
                           cost_complexity = tune(),
                           min_n=tune()) %>% #Type of model
@@ -335,22 +341,28 @@ reg_tree <- decision_tree(tree_depth = tune(),
 
 reg_tree_wf <-
   workflow() %>%
-  add_model(tree_mod) %>%
+  add_model(reg_tree) %>%
   add_recipe(log_recipe)
+
+reg_tree_tuning_grid <- grid_regular(tree_depth(),
+                                     cost_complexity(),
+                                     min_n(),
+                                     levels = 6)
 
 reg_tree_model <-
   tune_grid(
-    tree_wf,
+    reg_tree_wf,
     grid = reg_tree_tuning_grid,
     resamples = stacking_folds,
     metrics = metric_set(rmse),
     control = untunedModel)
 
+
 ## Specify with models to include
 my_stack <- stacks() %>%
   add_candidates(preg_models) %>%
   add_candidates(lin_reg_model) %>% 
-  add_candidates(reg_tree_model)
+  add_candidates(reg_tree)
 
 ## Fit the stacked model
 stack_mod <- my_stack %>%
@@ -364,16 +376,9 @@ stackData <- as_tibble(my_stack)
 ## Use the stacked data to get a prediction
 stack_mod %>% predict(new_data=test)
 
-# random_forest_model <-
-#   tune_grid(
-#     rf_wf,
-#     grid = tuning_grid,
-#     resamples = folds,
-#     metrics = metric_set(rmse),
-#     control = untunedModel) # including this in my stack made the score go up
-
 # Get Predictions for test set AND format for Kaggle
-stack_preds <- stack_mod %>% predict(new_data=test) %>%
+stack_preds <- predict(stack_mod, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
   bind_cols(., test) %>% #Bind predictions with test data
   select(datetime, .pred) %>% #Just keep datetime and predictions
   rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
@@ -383,5 +388,53 @@ stack_preds <- stack_mod %>% predict(new_data=test) %>%
 # Write prediction file to CSV
 vroom_write(x=stack_preds, file="./stacking_predictions.csv", delim=",")
 
+
+# Bart Model --------------------------------------------------------------
+# create bart model and workflow
+library(dbarts)
+bart_mod <- bart(trees = tune(),
+                   prior_terminal_node_coef = tune(),
+                   prior_terminal_node_expo = tune()) %>% 
+  set_engine("dbarts") %>% 
+  set_mode("regression")
+
+bart_wf <-
+  workflow(log_recipe) %>%
+  add_model(bart_mod)
+
+# create tuning grid
+tuning_grid <- grid_regular(trees(),
+                            prior_terminal_node_coef(),
+                            prior_terminal_node_expo(),
+                            levels = 5)
+
+# cross validation
+cv <- vfold_cv(data = log_bike, v = 5, repeats = 1)
+
+cv_results <- bart_wf %>%
+  tune_grid(resamples = cv,
+            grid = 3,
+            metrics=metric_set(rmse))
+
+# Get the best hyperparameters
+best_params <- cv_results %>%
+  select_best('rmse')
+
+# use the best model
+final_wf_bart <- bart_wf %>%
+  finalize_workflow(best_params) %>%
+  fit(data=log_bike)
+
+# Get Predictions for test set AND format for Kaggle
+bart_preds <- predict(final_wf_bart, new_data = test) %>% #This predicts log(count)
+  mutate(.pred=exp(.pred)) %>% # Back-transform the log to original scale
+  bind_cols(., test) %>% #Bind predictions with test data
+  select(datetime, .pred) %>% #Just keep datetime and predictions
+  rename(count=.pred) %>% #rename pred to count (for submission to Kaggle)
+  mutate(count=pmax(0, count)) %>% #pointwise max of (0, prediction)
+  mutate(datetime=as.character(format(datetime))) #needed for right format to Kaggle
+
+# Write prediction file to CSV
+vroom_write(x=bart_preds, file="./bart_predictions.csv", delim=",")
 
 
